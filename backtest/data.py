@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Union
+import json
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,7 @@ def _parse_book(raw: dict, local_ts: float) -> BookSnapshot:
       - bid/ask list of {price, size} dicts -> tuple of (float, float)
       - sort bids desc, asks asc (don't trust input ordering)
     """
+    with open('')
     raise NotImplementedError
 
 
