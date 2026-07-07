@@ -165,6 +165,51 @@ def filter_and_rank(
 
 
 # ---------------------------------------------------------------------------
+# Liquidity buckets (cockpit: thin / mid / thick contrast)
+# ---------------------------------------------------------------------------
+def pick_liquidity_spread(cands: List[Candidate], n_per_bucket: int = 1) -> dict:
+    """Pick contrasting candidates by *liquidity* (proxy for best-level queue
+    depth — the Hormuz lesson: deep queues rarely fill).
+
+    Splits the passing candidates into liquidity terciles and returns
+    ``{"thin": [...], "mid": [...], "thick": [...]}`` with up to
+    ``n_per_bucket`` from each: the LEAST liquid of the thin tercile, the
+    closest-to-median of the mid tercile, and the MOST liquid of the thick
+    tercile — maximising contrast for side-by-side observation.
+    """
+    out = {"thin": [], "mid": [], "thick": []}
+    if not cands:
+        return out
+    by_liq = sorted(cands, key=lambda c: c.liquidity)
+    n = len(by_liq)
+    if n < 3:
+        # too few to bucket meaningfully: spread what we have
+        for c, k in zip(by_liq, ("thin", "mid", "thick")):
+            out[k].append(c)
+        return out
+    lo, hi = by_liq[: n // 3], by_liq[-(n // 3):]
+    mid = by_liq[n // 3 : n - (n // 3)] or by_liq
+    med = mid[len(mid) // 2].liquidity
+    out["thin"] = lo[:n_per_bucket]                                  # least liquid
+    out["mid"] = sorted(mid, key=lambda c: abs(c.liquidity - med))[:n_per_bucket]
+    out["thick"] = list(reversed(hi[-n_per_bucket:]))                # most liquid
+    return out
+
+
+def format_liquidity_spread(buckets: dict) -> str:
+    lines = ["Liquidity spread for the cockpit (thin fills / thick doesn't — watch the contrast):"]
+    for label in ("thin", "mid", "thick"):
+        for c in buckets[label]:
+            lines.append(f"\n[{label.upper()}]  liq={c.liquidity:,.0f}  vol24h={c.volume24hr:,.0f}"
+                         f"  tick={c.tick_size}  {c.slug}")
+            lines.append(f"  Q: {_trunc(c.question, 70)}")
+            lines.append(f"  YES={c.yes_token}")
+        if not buckets[label]:
+            lines.append(f"\n[{label.upper()}]  (no candidate)")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Network + presentation
 # ---------------------------------------------------------------------------
 def fetch_markets(limit: int, timeout: float) -> List[dict]:
@@ -247,7 +292,22 @@ def _self_test() -> None:
     assert cands[0].tick_size == 0.01 and cands[0].min_size == 5.0
     # string-typed numbers and JSON-string token lists were coerced correctly
     assert isinstance(cands[0].volume24hr, float)
-    print("self-test passed: filtering, coercion, and ranking all correct.")
+
+    # liquidity-spread buckets (additive; original asserts above unchanged)
+    liq_cands = [
+        Candidate(slug=f"m{i}", question="q", volume24hr=1000.0, liquidity=liq,
+                  end_date=now, neg_risk=False, yes_token="Y", no_token="N",
+                  tick_size=0.01, min_size=5.0)
+        for i, liq in enumerate([100, 200, 300, 5000, 6000, 7000, 90000, 95000, 99000])
+    ]
+    b = pick_liquidity_spread(liq_cands)
+    assert b["thin"][0].liquidity == 100        # least liquid of low tercile
+    assert b["thick"][0].liquidity == 99000     # most liquid of high tercile
+    assert b["mid"][0].liquidity == 6000        # median of mid tercile
+    few = pick_liquidity_spread(liq_cands[:2])
+    assert few["thin"] and few["mid"] and not few["thick"]
+    assert pick_liquidity_spread([]) == {"thin": [], "mid": [], "thick": []}
+    print("self-test passed: filtering, coercion, ranking, and liquidity buckets all correct.")
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +324,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--timeout", type=float, default=20.0, help="HTTP timeout (s)")
     p.add_argument("--list-only", action="store_true", default=True,
                    help="list candidates only (selection is manual; always on)")
+    p.add_argument("--liquidity-spread", action="store_true",
+                   help="also print thin/mid/thick picks by liquidity (for the cockpit)")
     p.add_argument("--self-test", action="store_true", help="run offline logic check and exit")
     a = p.parse_args(argv)
 
@@ -283,6 +345,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                             min_days=a.min_days)
     print(f"Fetched {len(raw)} markets; {len(cands)} pass the pure-binary filters.\n")
     print(format_table(cands, a.top))
+    if a.liquidity_spread:
+        print("\n" + format_liquidity_spread(pick_liquidity_spread(cands)))
     return 0
 
 

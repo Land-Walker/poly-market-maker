@@ -1,0 +1,26 @@
+{
+  "_comment": "Cockpit market list. Fill token_id/slug from: python paper_trading/select_markets.py --liquidity-spread  (thin/mid/thick contrast per the Hormuz lesson: thick best-level queues rarely fill). loss_limit: auto-stop when equity < this (optional, null to disable).",
+  "markets": [
+    {
+      "token_id": "FILL_ME_THIN_YES_TOKEN_ID",
+      "slug": "thin-market",
+      "label": "thin",
+      "params": {"gamma": 1.0, "kappa": 10.0, "order_size": 10.0, "max_inventory": 100.0},
+      "loss_limit": -50.0
+    },
+    {
+      "token_id": "FILL_ME_MID_YES_TOKEN_ID",
+      "slug": "mid-market",
+      "label": "mid",
+      "params": {"gamma": 1.0, "kappa": 10.0, "order_size": 10.0, "max_inventory": 100.0},
+      "loss_limit": -50.0
+    },
+    {
+      "token_id": "FILL_ME_THICK_YES_TOKEN_ID",
+      "slug": "thick-market",
+      "label": "thick",
+      "params": {"gamma": 1.0, "kappa": 10.0, "order_size": 10.0, "max_inventory": 100.0},
+      "loss_limit": -50.0
+    }
+  ]
+}

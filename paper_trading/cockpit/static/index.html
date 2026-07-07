@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MM Cockpit — paper trading only</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#0e1117; --card:#161b24; --line:#2a3140; --fg:#dbe2ee; --dim:#8b95a7;
+          --green:#3fbf7f; --red:#e26d6d; --amber:#e2b53f; --blue:#5b9dd9; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:13px/1.45 "SF Mono", Consolas, Menlo, monospace; }
+  header { padding:10px 16px; border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  .paperbadge { color:var(--amber); border:1px solid var(--amber); border-radius:4px;
+                padding:1px 7px; font-size:11px; }
+  #conn { margin-left:auto; font-size:11px; color:var(--dim); }
+  #conn.ok::before { content:"● "; color:var(--green); }
+  #conn.bad::before { content:"● "; color:var(--red); }
+  #grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(360px, 1fr));
+          gap:12px; padding:12px 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px;
+          padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .card.stopped { opacity:.75; border-color:var(--red); }
+  .mkt-head { display:flex; align-items:center; gap:8px; }
+  .mkt-head .slug { font-weight:700; font-size:14px; }
+  .tag { font-size:10px; padding:1px 6px; border-radius:3px; border:1px solid var(--dim);
+         color:var(--dim); text-transform:uppercase; }
+  .tag.thin { color:var(--green); border-color:var(--green); }
+  .tag.mid { color:var(--blue); border-color:var(--blue); }
+  .tag.thick { color:var(--amber); border-color:var(--amber); }
+  .runstate { margin-left:auto; font-size:11px; }
+  .runstate.on { color:var(--green); } .runstate.off { color:var(--red); }
+  button { background:#232a38; color:var(--fg); border:1px solid var(--line);
+           border-radius:5px; padding:3px 10px; cursor:pointer; font:inherit; font-size:11px; }
+  button:hover { border-color:var(--blue); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .cell { flex:1; min-width:70px; background:#10141c; border:1px solid var(--line);
+          border-radius:5px; padding:5px 8px; }
+  .cell .k { font-size:10px; color:var(--dim); display:block; }
+  .cell .v { font-size:13px; }
+  .pos { color:var(--green); } .neg { color:var(--red); } .halt { color:var(--amber); }
+  .qsz { font-size:10px; color:var(--dim); }
+  table.fills { width:100%; border-collapse:collapse; font-size:11px; }
+  table.fills td { padding:1px 4px; color:var(--dim); }
+  table.fills td.side-BUY { color:var(--green); } table.fills td.side-SELL { color:var(--red); }
+  .params { display:grid; grid-template-columns:auto 1fr 64px; gap:4px 8px; align-items:center; }
+  .params label { font-size:11px; color:var(--dim); }
+  .params input[type=range] { width:100%; accent-color:var(--blue); }
+  .params input[type=number] { width:64px; background:#10141c; color:var(--fg);
+    border:1px solid var(--line); border-radius:4px; padding:2px 4px; font:inherit; font-size:11px; }
+  .perr { color:var(--red); font-size:11px; min-height:14px; white-space:pre-wrap; }
+  .pok  { color:var(--green); font-size:11px; }
+  .banner { background:#3a1d1d; border:1px solid var(--red); color:var(--red);
+            border-radius:5px; padding:4px 8px; font-size:11px; }
+  canvas.mini { width:100% !important; height:88px !important; background:#10141c;
+                border:1px solid var(--line); border-radius:5px; }
+  .chartlbl { font-size:10px; color:var(--dim); margin:2px 0 1px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MM Cockpit</h1>
+  <span class="paperbadge">PAPER — virtual orders only</span>
+  <span id="conn" class="bad">connecting…</span>
+</header>
+<div id="grid"></div>
+
+<script>
+"use strict";
+/* MM cockpit dashboard. Talks ONLY to the local control server:
+   WS /ws (snapshots in), POST /api/... (param + lifecycle out).
+   Nothing here can route a real order — the backend has no such code. */
+
+const PARAMS = [
+  // [key, label, slider-min, slider-max, step]  (number box accepts anything;
+  // the SERVER validates and rejects bad values — try extremes, learn safely)
+  ["gamma",         "γ gamma",        0.05, 10,   0.05],
+  ["kappa",         "κ kappa",        0.1,  50,   0.1 ],
+  ["order_size",    "order size",     1,    200,  1   ],
+  ["max_inventory", "max inventory",  0,    500,  5   ],
+];
+const cards = {};   // slug -> {el, charts, inputs, editing:Set, debounce}
+
+function fmt(v, d=3) { return (v === null || v === undefined) ? "—" : (+v).toFixed(d); }
+function cls(v) { return v > 0 ? "pos" : (v < 0 ? "neg" : ""); }
+
+/* ---------- card construction ------------------------------------------ */
+function makeCard(slug, m) {
+  const el = document.createElement("div");
+  el.className = "card"; el.id = "card-" + slug;
+  el.innerHTML = `
+    <div class="mkt-head">
+      <span class="slug">${slug}</span>
+      ${m.label ? `<span class="tag ${m.label}">${m.label}</span>` : ""}
+      <span class="runstate"></span>
+      <button class="btn-toggle"></button>
+    </div>
+    <div class="banner" style="display:none"></div>
+    <div class="row book-row">
+      <div class="cell"><span class="k">best bid · queue</span><span class="v bb"></span></div>
+      <div class="cell"><span class="k">mid</span><span class="v mid"></span></div>
+      <div class="cell"><span class="k">best ask · queue</span><span class="v ba"></span></div>
+    </div>
+    <div class="row">
+      <div class="cell"><span class="k">my bid</span><span class="v mybid"></span></div>
+      <div class="cell"><span class="k">my ask</span><span class="v myask"></span></div>
+    </div>
+    <div class="row">
+      <div class="cell"><span class="k">inventory</span><span class="v inv"></span></div>
+      <div class="cell"><span class="k">cash</span><span class="v cash"></span></div>
+      <div class="cell"><span class="k">equity</span><span class="v eq"></span></div>
+    </div>
+    <div class="row">
+      <div class="cell"><span class="k">spread capture</span><span class="v psc"></span></div>
+      <div class="cell"><span class="k">inventory pnl</span><span class="v pinv"></span></div>
+      <div class="cell"><span class="k">adverse cost</span><span class="v padv"></span></div>
+      <div class="cell"><span class="k">total pnl</span><span class="v ptot"></span></div>
+    </div>
+    <div class="row">
+      <div class="cell"><span class="k">fills</span><span class="v nf"></span></div>
+      <div class="cell"><span class="k">fill ratio</span><span class="v fr"></span></div>
+    </div>
+    <table class="fills"></table>
+    <div class="params"></div>
+    <div class="perr"></div>
+    <div class="chartlbl">inventory</div><canvas class="mini c-inv"></canvas>
+    <div class="chartlbl">spread capture vs adverse cost (cumulative)</div><canvas class="mini c-pnl"></canvas>
+    <div class="chartlbl">mid + my quotes</div><canvas class="mini c-mid"></canvas>`;
+  document.getElementById("grid").appendChild(el);
+
+  // params: slider + number box per tunable
+  const pbox = el.querySelector(".params");
+  const inputs = {};
+  const editing = new Set();
+  for (const [key, label, mn, mx, st] of PARAMS) {
+    const lab = document.createElement("label"); lab.textContent = label;
+    const rng = document.createElement("input");
+    rng.type = "range"; rng.min = mn; rng.max = mx; rng.step = st;
+    const num = document.createElement("input");
+    num.type = "number"; num.step = st;
+    pbox.append(lab, rng, num);
+    inputs[key] = { rng, num };
+    const send = v => queueParam(slug, key, v);
+    rng.addEventListener("input", () => { num.value = rng.value; send(rng.value); });
+    num.addEventListener("focus", () => editing.add(key));
+    num.addEventListener("blur",  () => editing.delete(key));
+    num.addEventListener("change", () => { rng.value = num.value; send(num.value); });
+  }
+  el.querySelector(".btn-toggle").addEventListener("click", () => toggleRun(slug));
+
+  const mkChart = (sel, datasets, opts={}) => new Chart(el.querySelector(sel), {
+    type: "line",
+    data: { labels: [], datasets },
+    options: {
+      animation:false, responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false} },
+      elements:{ point:{radius:0}, line:{borderWidth:1.2} },
+      scales:{ x:{display:false},
+               y:{ ticks:{color:"#8b95a7", font:{size:9}}, grid:{color:"#222836"} } },
+      ...opts }
+  });
+  const charts = {
+    inv: mkChart(".c-inv", [{data:[], borderColor:"#5b9dd9", fill:false}]),
+    pnl: mkChart(".c-pnl", [{data:[], borderColor:"#3fbf7f", fill:false},
+                            {data:[], borderColor:"#e26d6d", fill:false}]),
+    mid: mkChart(".c-mid", [{data:[], borderColor:"#dbe2ee", fill:false},
+                            {data:[], borderColor:"#3fbf7f", fill:false, borderDash:[3,3]},
+                            {data:[], borderColor:"#e26d6d", fill:false, borderDash:[3,3]}]),
+  };
+  cards[slug] = { el, charts, inputs, editing, debounce:{} };
+  return cards[slug];
+}
+
+/* ---------- rendering ---------------------------------------------------- */
+function render(slug, m) {
+  const c = cards[slug] || makeCard(slug, m);
+  const $ = sel => c.el.querySelector(sel);
+  c.el.classList.toggle("stopped", !m.running);
+
+  const rs = $(".runstate");
+  rs.textContent = m.running ? "RUNNING"
+    : "STOPPED" + (m.stopped_reason ? ` (${m.stopped_reason})` : "");
+  rs.className = "runstate " + (m.running ? "on" : "off");
+  $(".btn-toggle").textContent = m.running ? "stop" : "start";
+
+  const banner = $(".banner");
+  if (m.stopped_reason === "loss_limit") {
+    banner.style.display = "";
+    banner.textContent = `auto-stopped: equity ${fmt(m.position.equity,2)} < loss limit ${m.loss_limit}`;
+  } else banner.style.display = "none";
+
+  const b = m.book;
+  $(".mid").textContent = fmt(b.mid);
+  $(".bb").innerHTML = b.best_bid === null ? "—"
+    : `${fmt(b.best_bid,3)} <span class="qsz">q=${fmt(b.bid_queue,0)}</span>`;
+  $(".ba").innerHTML = b.best_ask === null ? "—"
+    : `${fmt(b.best_ask,3)} <span class="qsz">q=${fmt(b.ask_queue,0)}</span>`;
+
+  const q = m.quotes, halted = m.quoting_halted;
+  const qtxt = (side) => {
+    const o = q[side];
+    if (o) return `${fmt(o.price,3)} × ${fmt(o.size,1)}`;
+    return halted[side] ? `<span class="halt">PULLED (inv cap)</span>` : "—";
+  };
+  $(".mybid").innerHTML = qtxt("bid");
+  $(".myask").innerHTML = qtxt("ask");
+
+  const p = m.position;
+  const inv = $(".inv"); inv.textContent = fmt(p.inv,1); inv.className = "v inv " + cls(p.inv);
+  $(".cash").textContent = fmt(p.cash,2);
+  const eq = $(".eq"); eq.textContent = fmt(p.equity,2); eq.className = "v eq " + cls(p.equity);
+
+  const pn = m.pnl;
+  for (const [sel, v, colorV] of [
+      [".psc",  pn.spread_capture, pn.spread_capture],
+      [".pinv", pn.inventory_pnl,  pn.inventory_pnl],
+      [".padv", pn.adverse_cost,   -pn.adverse_cost],   // cost: red when positive
+      [".ptot", pn.total,          pn.total]]) {
+    const e = $(sel); e.textContent = fmt(v,3); e.className = "v " + sel.slice(1) + " " + cls(colorV);
+  }
+
+  $(".nf").textContent = m.fills.n_fills;
+  $(".fr").textContent = fmt(m.fills.fill_ratio,3);
+  $(".fills").innerHTML = m.fills.recent.slice().reverse().map(f =>
+    `<tr><td class="side-${f.side}">${f.side}</td><td>${fmt(f.price,3)}</td>
+     <td>×${fmt(f.qty,1)}</td><td>${new Date(f.ts*1000).toLocaleTimeString()}</td>
+     <td>${f.adverse === null ? "adv?" : (f.adverse ? "ADV" : "ok")}</td></tr>`).join("");
+
+  // params (don't clobber a field the user is editing or just changed)
+  for (const [key] of PARAMS) {
+    if (c.editing.has(key) || c.debounce[key]) continue;
+    const v = m.params[key];
+    c.inputs[key].rng.value = v;
+    c.inputs[key].num.value = v;
+  }
+  const perr = $(".perr");
+  if (m.param_error) {
+    perr.className = "perr";
+    perr.textContent = "rejected: " + Object.entries(m.param_error)
+      .map(([k,v]) => `${k}: ${v}`).join("; ");
+  } else if (!perr.dataset.local) perr.textContent = "";
+
+  // charts
+  const h = m.history, labels = h.ts.map(t => "");
+  const set = (chart, series) => {
+    chart.data.labels = labels;
+    series.forEach((s,i) => chart.data.datasets[i].data = s);
+    chart.update("none");
+  };
+  set(c.charts.inv, [h.inv]);
+  set(c.charts.pnl, [h.cum_spread, h.cum_adverse]);
+  set(c.charts.mid, [h.mid, h.my_bid, h.my_ask]);
+}
+
+/* ---------- control calls ------------------------------------------------ */
+function queueParam(slug, key, value) {
+  const c = cards[slug];
+  clearTimeout(c.debounce[key]);
+  c.debounce[key] = setTimeout(async () => {
+    delete c.debounce[key];
+    const perr = c.el.querySelector(".perr");
+    try {
+      const r = await fetch(`/api/markets/${encodeURIComponent(slug)}/params`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({[key]: parseFloat(value)}) });
+      const j = await r.json();
+      if (j.ok) {
+        perr.dataset.local = "1";
+        perr.className = "pok";
+        perr.textContent = `applied ${key}=${j.applied[key]}` +
+                           (j.requoted ? " → re-quoted immediately" : " → applies at next quote");
+        setTimeout(() => { delete perr.dataset.local; perr.className="perr"; perr.textContent=""; }, 2500);
+      } else {
+        perr.dataset.local = "1"; perr.className = "perr";
+        perr.textContent = "rejected: " + Object.entries(j.errors).map(([k,v])=>`${k}: ${v}`).join("; ");
+        setTimeout(() => { delete perr.dataset.local; }, 4000);
+      }
+    } catch (e) { perr.className = "perr"; perr.textContent = "request failed: " + e; }
+  }, 300);
+}
+
+async function toggleRun(slug) {
+  const running = cards[slug].el.querySelector(".runstate").classList.contains("on");
+  await fetch(`/api/markets/${encodeURIComponent(slug)}/${running ? "stop" : "start"}`,
+              {method:"POST"});
+}
+
+/* ---------- websocket ----------------------------------------------------- */
+function connect() {
+  const conn = document.getElementById("conn");
+  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://")
+                           + location.host + "/ws");
+  ws.onopen = () => { conn.className = "ok"; conn.textContent = "live"; };
+  ws.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type !== "snapshot") return;
+    for (const [slug, m] of Object.entries(msg.markets)) render(slug, m);
+    for (const slug of Object.keys(cards))      // market removed server-side
+      if (!(slug in msg.markets)) { cards[slug].el.remove(); delete cards[slug]; }
+  };
+  ws.onclose = () => { conn.className = "bad"; conn.textContent = "reconnecting…";
+                       setTimeout(connect, 2000); };
+  ws.onerror = () => ws.close();
+}
+connect();
+</script>
+</body>
+</html>
